@@ -31,7 +31,7 @@ cdef float cy_match_corr(float[:, :, :] a, float[:, :, :] b):
                 total += x * y
                 a_len += x * x
                 b_len += y * y
-    return total / (sqrt(a_len) * sqrt(b_len))
+    return -total / (sqrt(a_len) * sqrt(b_len))
 
 
 @cython.boundscheck(False)
