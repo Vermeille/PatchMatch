@@ -106,9 +106,9 @@ cdef float cy_match_cos(
         for j in range(kz):
             la += a_ptr[j] * a_ptr[j]
             lb += b_ptr[j] * b_ptr[j]
-            diff = a_ptr[j] - b_ptr[j]
+            diff = a_ptr[j] * b_ptr[j]
             total += diff * diff
-    return -diff / (sqrt(la) * sqrt(lb))
+    return -total / (sqrt(la) * sqrt(lb))
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
