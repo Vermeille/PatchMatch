@@ -12,5 +12,5 @@ setup(
             extra_compile_args=['-O3'])
         ]),
     zip_safe=False,
-    install_requires=['cython', 'numpy'],
+    install_requires=['cython', 'numpy', 'pillow'],
 )

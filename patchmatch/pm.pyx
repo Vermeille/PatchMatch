@@ -3,6 +3,7 @@ from libc.math cimport sqrt, ceil, exp, fabs
 import numpy as np
 cimport cython
 from libc.stdlib cimport rand, RAND_MAX
+from patchmatch.colors import rgb_to
 
 init='HI'
 
@@ -108,7 +109,7 @@ cdef float cy_match_cos(
             lb += b_ptr[j] * b_ptr[j]
             diff = a_ptr[j] * b_ptr[j]
             total += diff * diff
-    return -total / (sqrt(la) * sqrt(lb))
+    return -total / (sqrt(la) * sqrt(lb)) + 1
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
@@ -231,10 +232,12 @@ def cy_PatchMatch(
         src,
         tgt,
         int k,
+        *,
         int n_it=10,
         int min_n_it=4,
         nn=None,
-        float thresh_factor=0.99):
+        float thresh_factor=0.99,
+        pad='reflect'):
     assert min_n_it < n_it
     if nn is None:
         nn = np.stack([
@@ -255,9 +258,9 @@ def cy_PatchMatch(
     cdef int[:, :, ::1] sub = nn
     cdef int m = k >> 1
     cdef float[:, :, ::1] src_yuv = np.pad(
-            src, ((m, m), (m, m), (0, 0)), 'reflect')
+            src, ((m, m), (m, m), (0, 0)), pad)
     cdef float[:, :, ::1] tgt_yuv = np.pad(
-            tgt, ((m, m), (m, m), (0, 0)), 'reflect')
+            tgt, ((m, m), (m, m), (0, 0)), pad)
     cdef int e
     cdef int i, j
     cdef float total = 0
@@ -309,7 +312,7 @@ def render_arena(arena):
 @cython.cdivision(True)
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def vote(idx, arena, tgt, int k):
+def vote(idx, arena, tgt, int k, weighted=True, pad='reflect'):
     original_shape = idx.shape
 
     cdef int[:, :, ::1] idx_v = idx
@@ -322,12 +325,15 @@ def vote(idx, arena, tgt, int k):
     cdef int pk
     cdef float p
     cdef float ns = idx.shape[0] * idx.shape[1]
-    cdef float[:, :, ::1] tgt_v = np.pad(tgt, ((m, m), (m, m), (0, 0)), 'reflect')
-    res = np.pad(arena, ((m, m), (m, m), (0, 0)), mode='reflect')
+    cdef float[:, :, ::1] tgt_v = np.pad(tgt, ((m, m), (m, m), (0, 0)), pad)
+    res = np.pad(arena, ((m, m), (m, m), (0, 0)), mode=pad)
 
     cdef float[:, :, ::1] res_v = res
     cdef int z = res_v.shape[2] - 1
     cdef float* res_vi
+
+    if not weighted:
+        ns = 1.0
 
     for i in range(idx_v.shape[0]):
         for j in range(idx_v.shape[1]):
@@ -345,8 +351,8 @@ def vote(idx, arena, tgt, int k):
 
 @cython.cdivision(True)
 @cython.boundscheck(False)
-#@cython.wraparound(False)
-def reverse_vote(idx, arena, tgt, int k):
+@cython.wraparound(False)
+def reverse_vote(idx, arena, tgt, int k, weighted=True, pad='reflect'):
     original_shape = arena.shape
 
     cdef int[:, :, ::1] idx_v = idx
@@ -358,13 +364,17 @@ def reverse_vote(idx, arena, tgt, int k):
     cdef int pj
     cdef int pk
     cdef float p
+    cdef float ns = idx.shape[0] * idx.shape[1]
     cdef float[:, :, ::1] tgt_v = np.pad(
-            tgt, ((m, m), (m, m), (0, 0)), 'reflect')
-    res = np.pad(arena, ((m, m), (m, m), (0, 0)), mode='reflect')
+            tgt, ((m, m), (m, m), (0, 0)), pad)
+    res = np.pad(arena, ((m, m), (m, m), (0, 0)), mode=pad)
 
     cdef float[:, :, ::1] res_v = res
     cdef int z = res_v.shape[2] - 1
     cdef (int, int) dst
+
+    if not weighted:
+        ns = 1
 
     for i in range(idx_v.shape[0]):
         for j in range(idx_v.shape[1]):
@@ -373,8 +383,59 @@ def reverse_vote(idx, arena, tgt, int k):
                 for pj in range(k):
                     for pk in range(z):
                         p = tgt_v[i + pi, j + pj, pk]
-                        res_v[dst[0] + pi, dst[1] + pj, pk] += p
-                    res_v[dst[0] + pi, dst[1] + pj, z] += 1
+                        res_v[dst[0] + pi, dst[1] + pj, pk] += p * ns
+                    res_v[dst[0] + pi, dst[1] + pj, z] += ns
 
     return np.ascontiguousarray(
             res[m:m + original_shape[0], m:m + original_shape[1], :])
+
+
+class PatchMatch:
+    def __init__(self,
+                 *,
+                 k=7,
+                 nb_min_it=2,
+                 nb_max_it=10,
+                 auto_thresh=0.99,
+                 weighted=True,
+                 space='yuv',
+                 metric='l1',
+                 pad='reflect'):
+        set_match_metric(metric)
+        self.k = k
+        self.nb_min_it = nb_min_it
+        self.nb_max_it = nb_max_it
+        self.auto_thresh = auto_thresh
+        self.space = space
+        self.pad = pad
+
+    def arena(self, target):
+        return make_vote_arena(target)
+
+    def vote(self, nn, arena, image):
+        return vote(nn, arena, image, k=self.k, pad=self.pad)
+
+    def render_arena(self, arena):
+        return render_arena(arena)
+
+    def reverse_vote(self, nn, arena, image):
+        return reverse_vote(nn, arena, image, k=self.k, pad=self.pad)
+
+    def forward(self, target, reference, *, nn_prior=None):
+        return cy_PatchMatch(rgb_to(target, self.space),
+                                rgb_to(reference, self.space),
+                                k=self.k,
+                                nn=nn_prior,
+                                thresh_factor=self.auto_thresh,
+                                min_n_it=self.nb_min_it,
+                                n_it=self.nb_max_it,
+                                pad=self.pad)
+
+    def bidir(self,
+              target,
+              reference,
+              *,
+              nn_forward_prior=None,
+              nn_backward_prior=None):
+        return (self.forward(target, reference, nn_prior=nn_forward_prior),
+                self.forward(reference, target, nn_prior=nn_backward_prior))
